@@ -793,3 +793,249 @@ class RelevanceMetric:
 
 ---
 
+## Custom Prompt Judge
+
+This feature allows users to create custom evaluation judges using their own prompt templates with categorical choices.
+
+**Location**: `/home/user/mlflow/mlflow/genai/judges/custom_prompt_judge.py`
+
+### Custom Prompt Judge Template System
+
+**Purpose**: Enables creation of custom judges with user-defined prompts and categorical outputs. Useful for domain-specific evaluations not covered by built-in judges.
+
+**Key Features**:
+- Supports variable substitution using `{{variable_name}}` syntax
+- Requires categorical choices marked with `[[CHOICE_NAME]]` syntax
+- Optional mapping from categorical values to numeric scores
+- Automatic structured output formatting
+
+**Variable Substitution**:
+- Variables: `{{var_name}}` - alphanumeric with underscores
+- Choices: `[[choice_name]]` - alphanumeric with underscores and spaces
+
+**Output Format**: Automatically adds structured JSON output instructions to ensure consistent responses
+
+**File**: `custom_prompt_judge.py:16-100`
+
+**Example Template**:
+
+```python
+prompt_template = """
+You will look at the response and determine the formality of the response.
+
+<request>{{request}}</request>
+<response>{{response}}</response>
+
+You must choose one of the following categories.
+
+[[formal]]: The response is very formal.
+[[semi_formal]]: The response is somewhat formal. The response is somewhat formal if the
+response mentions friendship, etc.
+[[not_formal]]: The response is not formal.
+"""
+
+# Optional numeric mapping
+numeric_values = {
+    "formal": 1.0,
+    "semi_formal": 0.5,
+    "not_formal": 0.0
+}
+```
+
+**Choice Pattern Extraction**:
+- Uses regex pattern: `r"\[\[([\w ]+)\]\]"`
+- Validates that all choices have corresponding numeric values (if provided)
+- Raises error if no choices found in template
+
+**Structured Output Instructions**: The system automatically augments user templates with JSON output format requirements to ensure consistent, parseable responses.
+
+---
+
+## Example Prompts
+
+These are example prompts from use cases and integrations demonstrating practical prompt patterns.
+
+**Location**: `/home/user/mlflow/examples/llama_index/workflow/workflow/prompts.py`
+
+### 1. Query Transformation Prompt
+
+**Purpose**: Refines user queries to improve search effectiveness. Optimizes queries for better retrieval results by analyzing semantic intent and rephrasing for search performance.
+
+**Use Case**: Web search query optimization, search preprocessing
+
+**Input Variables**:
+- `query`: Original user query
+
+**Output**: Optimized query string only
+
+**File**: `prompts.py:2-11`
+
+```python
+TRANSFORM_QUERY_TEMPLATE = """\
+Your task is to refine a query to ensure it is highly effective for retrieving relevant search results.
+Analyze the given input to grasp the core semantic intent or meaning.
+
+Original Query:
+-------------------
+{query}
+
+Your goal is to rephrase or enhance this query to improve its search performance. Ensure the revised query is concise and directly aligned with the intended search objective.
+Respond with the optimized query only"""
+```
+
+**Key Characteristics**:
+- Focus on semantic intent analysis
+- Concise output requirement
+- Search optimization objective
+- No additional explanation required
+
+### 2. RAG Final Query Prompt
+
+**Purpose**: Answers user questions using provided context in a RAG (Retrieval-Augmented Generation) system. Ensures answers are grounded in retrieved context rather than prior knowledge.
+
+**Use Case**: Question answering with retrieval context, RAG systems
+
+**Input Variables**:
+- `context`: Retrieved context information
+- `query`: User question
+
+**Output**: Answer to the question only
+
+**File**: `prompts.py:15-26`
+
+```python
+FINAL_QUERY_TEMPLATE = """\
+Your task is to answer the user query as a professional and very helpful assistant. You must use the given context for answering the question and not prior knowledge. Context information is below.
+
+Context:
+-------------------
+{context}
+
+User Question:
+--------------
+{query}
+
+Respond with the answer to the question only:"""
+```
+
+**Key Characteristics**:
+- Professional assistant persona
+- Strict context grounding (no prior knowledge)
+- Clear separation of context and question
+- Direct answer requirement without elaboration
+
+---
+
+## Prompt Optimization
+
+MLflow supports automatic prompt optimization using external libraries like GEPA (Genetic-Pareto optimization).
+
+**Location**: `/home/user/mlflow/mlflow/genai/optimize/optimizers/gepa_optimizer.py`
+
+### GEPA Prompt Optimizer
+
+**Purpose**: Automatically optimizes prompts using iterative mutation, reflection, and Pareto-aware candidate selection. Leverages LLMs to reflect on system behavior and propose improvements.
+
+**How It Works**:
+1. **Evaluation**: Runs prompts on training data and collects scores
+2. **Reflection**: Uses LLM to analyze traces and propose improvements
+3. **Mutation**: Generates new prompt candidates based on reflection
+4. **Selection**: Pareto-aware selection of best candidates
+5. **Iteration**: Repeats until max_metric_calls reached
+
+**Reflective Dataset Creation**:
+The optimizer creates reflective datasets for the LLM to analyze:
+- Current prompt text
+- Execution traces (spans with inputs/outputs)
+- Evaluation scores
+- Input/output pairs
+- Expected outputs and rationales
+
+**File**: `gepa_optimizer.py:152-205`
+
+```python
+def make_reflective_dataset(
+    self,
+    candidate: dict[str, str],
+    eval_batch: "gepa.EvaluationBatch[EvaluationResultRecord, Any]",
+    components_to_update: list[str],
+) -> dict[str, list[dict[str, Any]]]:
+    """
+    Build a reflective dataset for instruction refinement.
+
+    Args:
+        candidate: The evaluated candidate
+        eval_batch: Result of evaluate with capture_traces=True
+        components_to_update: Component names to update
+
+    Returns:
+        Dict of reflective dataset per component
+    """
+    reflective_datasets = {}
+
+    for component_name in components_to_update:
+        component_data = []
+
+        trajectories = eval_batch.trajectories
+
+        for i, (trajectory, score) in enumerate(zip(trajectories, eval_batch.scores)):
+            trace = trajectory.trace
+            spans = []
+            if trace:
+                spans = [
+                    {
+                        "name": span.name,
+                        "inputs": span.inputs,
+                        "outputs": span.outputs,
+                    }
+                    for span in trace.data.spans
+                ]
+
+            component_data.append(
+                {
+                    "component_name": component_name,
+                    "current_text": candidate.get(component_name, ""),
+                    "trace": spans,
+                    "score": score,
+                    "inputs": trajectory.inputs,
+                    "outputs": trajectory.outputs,
+                    "expectations": trajectory.expectations,
+                    "rationales": trajectory.rationales,
+                    "index": i,
+                }
+            )
+
+        reflective_datasets[component_name] = component_data
+
+    return reflective_datasets
+```
+
+**Note**: The actual reflection prompts are generated by the external GEPA library, not hardcoded in MLflow. MLflow provides the adapter interface to integrate with GEPA's optimization algorithm.
+
+**Key Configuration**:
+- `reflection_model`: LLM used for reflection and optimization
+- `max_metric_calls`: Budget for evaluation calls
+- `display_progress_bar`: Progress visualization
+- `use_mlflow`: Enable MLflow tracking of optimization
+
+---
+
+## Summary
+
+MLflow's AI prompt infrastructure supports:
+
+1. **8 Built-in Judge Prompts** for common evaluation tasks (correctness, groundedness, relevance, safety, etc.)
+2. **Trace-Based Evaluation** with tool-assisted analysis for complex agent behaviors
+3. **5 LLM-as-Judge Metrics** with detailed rubrics and examples (similarity, faithfulness, correctness, relevance)
+4. **Custom Prompt Judges** with categorical choices and optional numeric mapping
+5. **RAG System Prompts** for query transformation and context-grounded answering
+6. **Automatic Prompt Optimization** via GEPA integration with reflection-based improvement
+
+**Common Patterns**:
+- **Variable Substitution**: `{{variable_name}}` for templating
+- **Structured Output**: JSON format with `rationale` and `result`/`score` fields
+- **Chain-of-Thought**: "Let's think step by step" reasoning
+- **XML-style Tags**: `<question>`, `<answer>`, `<document>` for clarity
+- **Grounding Instructions**: Explicit "no external knowledge" directives
+- **Examples**: Concrete examples for few-shot learning
+
