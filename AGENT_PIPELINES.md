@@ -776,3 +776,622 @@ All three RAG pipelines follow this pattern:
 
 ---
 
+## Prompt Optimization Pipeline (GEPA)
+
+**Purpose**: Automatically optimize prompts using Genetic-Pareto algorithm with LLM-based reflection. Iteratively improves prompts by evaluating performance, analyzing traces, and generating better candidates.
+
+**Main Entry Point**: `mlflow.genai.optimize_prompts()`
+**Files**:
+- `/home/user/mlflow/mlflow/genai/optimize/optimize.py`
+- `/home/user/mlflow/mlflow/genai/optimize/optimizers/gepa_optimizer.py`
+
+### Pipeline Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    GEPA PROMPT OPTIMIZATION PIPELINE                         │
+│              (Iterative Evaluation → Reflection → Mutation)                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────┐
+│  Input                           │
+│  - predict_fn                    │
+│  - train_data                    │
+│  - initial_prompt_uris           │
+│  - scorers + aggregation         │
+│  - optimizer config              │
+└─────────────┬────────────────────┘
+              │
+              ▼
+┌─────────────────────────────────────────────────┐
+│  1. PREPARATION                                 │
+│     ┌──────────────────────────────────┐        │
+│     │ Load Prompts by URI              │        │
+│     │ - Fetch PromptVersion objects    │        │
+│     │ - Extract templates              │        │
+│     └──────────────┬───────────────────┘        │
+│                    │                             │
+│                    ▼                             │
+│     ┌──────────────────────────────────┐        │
+│     │ Build metric_fn                  │        │
+│     │ - Combine scorers                │        │
+│     │ - Apply aggregation (mean, etc.) │        │
+│     └──────────────┬───────────────────┘        │
+│                    │                             │
+│                    ▼                             │
+│     ┌──────────────────────────────────┐        │
+│     │ Create eval_fn                   │        │
+│     │ (wraps predict_fn + metric_fn)   │        │
+│     └──────────────────────────────────┘        │
+└─────────────┬───────────────────────────────────┘
+              │
+              ▼
+┌─────────────────────────────────────────────────┐
+│  2. ITERATIVE OPTIMIZATION LOOP                 │
+│     (Max iterations: max_metric_calls)           │
+└─────────────┬───────────────────────────────────┘
+              │
+    ┌─────────▼────────────────────────────────────────────┐
+    │  For each candidate prompt:                          │
+    └─────────┬────────────────────────────────────────────┘
+              │
+              ▼
+    ┌──────────────────────────────────────────────────────┐
+    │  EVALUATE Phase                                      │
+    │  ┌────────────────────────────────────────────┐      │
+    │  │  a) Patch PromptVersion.template           │      │
+    │  │     - Temporarily replace with candidate   │      │
+    │  └────────────┬───────────────────────────────┘      │
+    │               │                                       │
+    │               ▼                                       │
+    │  ┌────────────────────────────────────────────┐      │
+    │  │  b) For each training example:             │      │
+    │  │     ┌──────────────────────────────┐       │      │
+    │  │     │ Call predict_fn(inputs)      │       │      │
+    │  │     │ - Uses current candidate     │       │      │
+    │  │     │ - Captures trace             │       │      │
+    │  │     └──────────┬───────────────────┘       │      │
+    │  │                │                            │      │
+    │  │                ▼                            │      │
+    │  │     ┌──────────────────────────────┐       │      │
+    │  │     │ Call metric_fn(inputs,       │       │      │
+    │  │     │               outputs,       │       │      │
+    │  │     │               expectations,  │       │      │
+    │  │     │               trace)         │       │      │
+    │  │     │ - Returns aggregated score   │       │      │
+    │  │     └──────────┬───────────────────┘       │      │
+    │  │                │                            │      │
+    │  │                ▼                            │      │
+    │  │     ┌──────────────────────────────┐       │      │
+    │  │     │ Collect:                     │       │      │
+    │  │     │ - inputs                     │       │      │
+    │  │     │ - outputs                    │       │      │
+    │  │     │ - score                      │       │      │
+    │  │     │ - trace                      │       │      │
+    │  │     │ - rationales (from scorers)  │       │      │
+    │  │     │ - expectations               │       │      │
+    │  │     └──────────┬───────────────────┘       │      │
+    │  └────────────────┼────────────────────────────┘      │
+    │                   │                                    │
+    │                   ▼                                    │
+    │  ┌────────────────────────────────────────────┐       │
+    │  │  c) Return EvaluationBatch                 │       │
+    │  │     - outputs: list of outputs             │       │
+    │  │     - scores: list of scores               │       │
+    │  │     - trajectories: list of                │       │
+    │  │       EvaluationResultRecord (if traces)   │       │
+    │  └────────────────────────────────────────────┘       │
+    └──────────────────┬─────────────────────────────────────┘
+                       │
+                       ▼
+    ┌──────────────────────────────────────────────────────────┐
+    │  REFLECT Phase (if capture_traces=True)                  │
+    │  ┌────────────────────────────────────────────┐          │
+    │  │  make_reflective_dataset():                │          │
+    │  │                                            │          │
+    │  │  For each trajectory & score:              │          │
+    │  │  ┌──────────────────────────────────┐     │          │
+    │  │  │ Extract trace spans:             │     │          │
+    │  │  │ - span.name                      │     │          │
+    │  │  │ - span.inputs                    │     │          │
+    │  │  │ - span.outputs                   │     │          │
+    │  │  └──────────┬───────────────────────┘     │          │
+    │  │             │                              │          │
+    │  │             ▼                              │          │
+    │  │  ┌──────────────────────────────────┐     │          │
+    │  │  │ Build reflection record:         │     │          │
+    │  │  │ {                                │     │          │
+    │  │  │   "component_name": "prompt_1",  │     │          │
+    │  │  │   "current_text": "Answer...",   │     │          │
+    │  │  │   "trace": [spans],              │     │          │
+    │  │  │   "score": 0.75,                 │     │          │
+    │  │  │   "inputs": {...},               │     │          │
+    │  │  │   "outputs": {...},              │     │          │
+    │  │  │   "expectations": {...},         │     │          │
+    │  │  │   "rationales": ["..."],         │     │          │
+    │  │  │   "index": 0                     │     │          │
+    │  │  │ }                                │     │          │
+    │  │  └──────────────────────────────────┘     │          │
+    │  │                                            │          │
+    │  │  Return: reflective_datasets[prompt_name] │          │
+    │  └────────────┬───────────────────────────────┘          │
+    └───────────────┼──────────────────────────────────────────┘
+                    │
+                    ▼
+    ┌───────────────────────────────────────────────────────────┐
+    │  MUTATE Phase (GEPA Library)                              │
+    │  ┌─────────────────────────────────────────────┐          │
+    │  │  GEPA uses reflection_lm to:                │          │
+    │  │                                             │          │
+    │  │  1. Analyze reflective dataset:             │          │
+    │  │     - Current prompt text                   │          │
+    │  │     - Execution traces                      │          │
+    │  │     - Scores achieved                       │          │
+    │  │     - Rationales for scores                 │          │
+    │  │                                             │          │
+    │  │  2. Generate improved prompt candidates:    │          │
+    │  │     - Identify weaknesses                   │          │
+    │  │     - Propose modifications                 │          │
+    │  │     - Create new prompt text                │          │
+    │  │                                             │          │
+    │  │  Note: Actual reflection prompts are        │          │
+    │  │  internal to GEPA library, not in MLflow    │          │
+    │  └─────────────┬───────────────────────────────┘          │
+    └────────────────┼──────────────────────────────────────────┘
+                     │
+                     ▼
+    ┌────────────────────────────────────────────────────┐
+    │  SELECT Phase (GEPA Library)                       │
+    │  - Pareto-aware candidate selection                │
+    │  - Balances multiple objectives                    │
+    │  - Maintains diversity in population               │
+    └────────────────┬───────────────────────────────────┘
+                     │
+                     │
+                     └──────────┐
+                                │
+                                ▼
+                         ┌──────────────┐
+                         │ Loop back to │
+                         │ EVALUATE     │
+                         └──────────────┘
+                                │
+                                │ (until max_metric_calls reached)
+                                │
+                                ▼
+              ┌─────────────────────────────────┐
+              │  3. FINALIZATION                │
+              │     ┌───────────────────────┐   │
+              │     │ Select best candidate │   │
+              │     │ - Highest score       │   │
+              │     └───────────┬───────────┘   │
+              │                 │               │
+              │                 ▼               │
+              │     ┌───────────────────────┐   │
+              │     │ Register optimized    │   │
+              │     │ prompts as new        │   │
+              │     │ versions              │   │
+              │     └───────────┬───────────┘   │
+              │                 │               │
+              │                 ▼               │
+              │     ┌───────────────────────┐   │
+              │     │ Return result:        │   │
+              │     │ - optimized_prompts   │   │
+              │     │ - initial_score       │   │
+              │     │ - final_score         │   │
+              │     └───────────────────────┘   │
+              └─────────────────────────────────┘
+```
+
+### Data Flow Through GEPA Pipeline
+
+**Phase 1: Evaluation**
+```
+Candidate Prompt → Patch Template → Run predict_fn() → Capture Trace →
+Run scorers → Aggregate Score → EvaluationResultRecord
+```
+
+**Phase 2: Reflection**
+```
+EvaluationResultRecord[] → Extract Traces → Build Reflection Data →
+{current_text, traces, scores, rationales} → Feed to GEPA
+```
+
+**Phase 3: Mutation**
+```
+Reflection Data → GEPA Reflection LLM → Analyze Performance →
+Identify Improvements → Generate New Candidate Prompts
+```
+
+**Phase 4: Selection**
+```
+New Candidates → Evaluate All → Pareto Selection → Keep Best Diverse Set
+```
+
+### Example Reflection Dataset Record
+
+```python
+{
+    "component_name": "qa_prompt",
+    "current_text": "Answer the following question: {{question}}",
+    "trace": [
+        {
+            "name": "predict",
+            "inputs": {"question": "What is MLflow?"},
+            "outputs": {"answer": "MLflow is a platform."}
+        },
+        {
+            "name": "llm_call",
+            "inputs": {"prompt": "Answer: What is MLflow?"},
+            "outputs": {"text": "MLflow is a platform."}
+        }
+    ],
+    "score": 0.6,
+    "inputs": {"question": "What is MLflow?"},
+    "outputs": {"answer": "MLflow is a platform."},
+    "expectations": {"expected": "MLflow is an open-source platform..."},
+    "rationales": ["Answer lacks detail about ML lifecycle management"],
+    "index": 0
+}
+```
+
+GEPA's reflection LLM analyzes this to understand that the prompt should explicitly ask for detailed explanations.
+
+### Key Files
+
+- **Main Optimize**: `/home/user/mlflow/mlflow/genai/optimize/optimize.py`
+- **GEPA Optimizer**: `/home/user/mlflow/mlflow/genai/optimize/optimizers/gepa_optimizer.py`
+- **Types**: `/home/user/mlflow/mlflow/genai/optimize/types.py`
+- **GEPA Library**: External (pip install gepa)
+
+### Configuration Parameters
+
+- **reflection_model**: LLM for reflection (e.g., "openai:/gpt-4o")
+- **max_metric_calls**: Evaluation budget (default: 100)
+- **display_progress_bar**: Show progress (default: False)
+- **use_mlflow**: Enable MLflow tracking (default: True)
+
+---
+
+## Built-in Judge Pipeline
+
+**Purpose**: Simple, direct judge evaluation using pre-defined prompts without tool calling or trace analysis.
+
+**Main File**: `/home/user/mlflow/mlflow/genai/judges/builtin.py`
+
+### Pipeline Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         BUILT-IN JUDGE PIPELINE                              │
+│                    (Simple Prompt-based Evaluation)                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌────────────────────┐
+│  Judge Input       │
+│  - request         │
+│  - response        │
+│  - context/ground  │
+│    truth (varies)  │
+└─────────┬──────────┘
+          │
+          ▼
+┌─────────────────────────────────────┐
+│  1. Select Pre-defined Prompt       │
+│     Based on judge type:            │
+│     - is_correct()                  │
+│       → CORRECTNESS_PROMPT          │
+│     - is_grounded()                 │
+│       → GROUNDEDNESS_PROMPT         │
+│     - is_safe()                     │
+│       → SAFETY_PROMPT               │
+│     - meets_guidelines()            │
+│       → GUIDELINES_PROMPT           │
+│     - etc.                          │
+└─────────┬───────────────────────────┘
+          │
+          ▼
+┌─────────────────────────────────────┐
+│  2. Format Prompt with Variables    │
+│     Using format_prompt():          │
+│     - Replace {{input}}             │
+│     - Replace {{output}}            │
+│     - Replace {{context}}           │
+│     - etc.                          │
+└─────────┬───────────────────────────┘
+          │
+          ▼
+┌─────────────────────────────────────┐
+│  3. Invoke LLM Judge                │
+│     invoke_judge_model(             │
+│       messages=[{                   │
+│         "role": "user",             │
+│         "content": formatted_prompt │
+│       }],                           │
+│       response_format={             │
+│         "type": "json_schema",      │
+│         "schema": {                 │
+│           "rationale": "string",    │
+│           "result": "string"        │
+│         }                           │
+│       }                             │
+│     )                               │
+└─────────┬───────────────────────────┘
+          │
+          ▼
+┌─────────────────────────────────────┐
+│  4. Parse JSON Response             │
+│     Extract:                        │
+│     - rationale                     │
+│     - result (yes/no or value)      │
+└─────────┬───────────────────────────┘
+          │
+          ▼
+┌─────────────────────────────────────┐
+│  5. Create Feedback Object          │
+│     Feedback(                       │
+│       name=judge_name,              │
+│       value=result,                 │
+│       rationale=rationale           │
+│     )                               │
+└─────────┬───────────────────────────┘
+          │
+          ▼
+    ┌─────────────┐
+    │   Return    │
+    └─────────────┘
+```
+
+### Example: Correctness Judge Flow
+
+**Input**:
+```python
+is_correct(
+    request="What is MLflow?",
+    response="MLflow is an open-source platform.",
+    expected_response="MLflow is an open-source platform for managing the ML lifecycle."
+)
+```
+
+**Step 1: Select Prompt**
+```python
+CORRECTNESS_PROMPT from correctness.py
+```
+
+**Step 2: Format**
+```
+Consider the following question, claim and document...
+
+<question>What is MLflow?</question>
+<claim>MLflow is an open-source platform for managing the ML lifecycle.</claim>
+<document>What is MLflow? - MLflow is an open-source platform.</document>
+
+Please indicate whether each statement in the claim is supported...
+{
+  "rationale": "...",
+  "result": "yes|no"
+}
+```
+
+**Step 3: Invoke LLM**
+```
+LLM receives formatted prompt → Generates response
+```
+
+**Step 4: Parse Response**
+```json
+{
+  "rationale": "Let's think step by step. The document states MLflow is an open-source platform, which matches the claim. However, the document doesn't mention 'managing the ML lifecycle', so the claim is not fully supported.",
+  "result": "no"
+}
+```
+
+**Step 5: Create Feedback**
+```python
+Feedback(
+    name="correctness",
+    value="no",
+    rationale="Let's think step by step..."
+)
+```
+
+### Available Built-in Judges
+
+1. **is_correct()**: Correctness against ground truth
+2. **is_grounded()**: Groundedness in context
+3. **is_context_sufficient()**: Context sufficiency
+4. **is_safe()**: Content safety
+5. **meets_guidelines()**: Guideline compliance
+6. **is_equivalent()**: Output equivalence
+
+### Key Characteristics
+
+- **Simple**: One LLM call per evaluation
+- **Deterministic prompts**: Pre-defined, well-tested
+- **Structured output**: JSON with rationale + result
+- **Fast**: No tool calling or iteration
+- **Reusable**: Same prompts across different judges
+
+---
+
+## Custom Prompt Judge Pipeline
+
+**Purpose**: Allow users to create custom judges with their own prompts and categorical choices.
+
+**Main File**: `/home/user/mlflow/mlflow/genai/judges/custom_prompt_judge.py`
+
+### Pipeline Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       CUSTOM PROMPT JUDGE PIPELINE                           │
+│                   (User-defined Categorical Evaluation)                      │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌────────────────────┐
+│  Judge Creation    │
+│  - prompt_template │
+│  - numeric_values  │
+│    (optional)      │
+└─────────┬──────────┘
+          │
+          ▼
+┌─────────────────────────────────────────┐
+│  1. Extract Choices from Template       │
+│     Using regex: \[\[([\w ]+)\]\]      │
+│                                         │
+│     Example template:                   │
+│     "[[formal]]: Very formal response"  │
+│     "[[semi_formal]]: Somewhat formal"  │
+│     "[[not_formal]]: Not formal"        │
+│                                         │
+│     Extracted: ["formal",               │
+│                 "semi_formal",          │
+│                 "not_formal"]           │
+└─────────┬───────────────────────────────┘
+          │
+          ▼
+┌─────────────────────────────────────────┐
+│  2. Validate Choices                    │
+│     If numeric_values provided:         │
+│     - Check all choices have values     │
+│     - Raise error if mismatch           │
+└─────────┬───────────────────────────────┘
+          │
+          ▼
+┌─────────────────────────────────────────┐
+│  3. Create Judge Function               │
+│     Returns callable that:              │
+│     - Accepts keyword args              │
+│     - Formats template                  │
+│     - Adds structured output            │
+│       instructions                      │
+│     - Invokes LLM                       │
+│     - Returns Feedback                  │
+└─────────┬───────────────────────────────┘
+          │
+          ▼
+    ┌─────────────┐
+    │ Return Judge│
+    └─────────────┘
+
+
+RUNTIME EXECUTION:
+─────────────────
+
+┌────────────────────┐
+│  Judge Invocation  │
+│  judge(            │
+│    request="...",  │
+│    response="..."  │
+│  )                 │
+└─────────┬──────────┘
+          │
+          ▼
+┌─────────────────────────────────────────┐
+│  1. Format Template with Variables      │
+│     Replace {{request}}, {{response}}   │
+└─────────┬───────────────────────────────┘
+          │
+          ▼
+┌─────────────────────────────────────────┐
+│  2. Add Structured Output Instructions  │
+│     Append JSON format requirements     │
+└─────────┬───────────────────────────────┘
+          │
+          ▼
+┌─────────────────────────────────────────┐
+│  3. Invoke LLM with Prompt              │
+└─────────┬───────────────────────────────┘
+          │
+          ▼
+┌─────────────────────────────────────────┐
+│  4. Parse Response                      │
+│     Extract chosen category             │
+└─────────┬───────────────────────────────┘
+          │
+          ▼
+┌─────────────────────────────────────────┐
+│  5. Map to Numeric Value (if provided)  │
+│     e.g., "formal" → 1.0                │
+└─────────┬───────────────────────────────┘
+          │
+          ▼
+┌─────────────────────────────────────────┐
+│  6. Create and Return Feedback          │
+│     Feedback(                           │
+│       name=judge_name,                  │
+│       value=category or numeric,        │
+│       rationale=explanation             │
+│     )                                   │
+└─────────────────────────────────────────┘
+```
+
+### Example Flow
+
+**Creation**:
+```python
+judge = custom_prompt_judge(
+    name="formality",
+    prompt_template="""
+<request>{{request}}</request>
+<response>{{response}}</response>
+
+Choose:
+[[formal]]: Very formal
+[[semi_formal]]: Somewhat formal
+[[not_formal]]: Not formal
+""",
+    numeric_values={
+        "formal": 1.0,
+        "semi_formal": 0.5,
+        "not_formal": 0.0
+    }
+)
+```
+
+**Invocation**:
+```python
+result = judge(
+    request="Hi there!",
+    response="Greetings, esteemed colleague."
+)
+```
+
+**Runtime**:
+1. Template formatted with request/response
+2. LLM chooses category: "formal"
+3. Mapped to numeric: 1.0
+4. Returns: `Feedback(name="formality", value=1.0, rationale="...")`
+
+---
+
+## Summary
+
+### Pipeline Comparison
+
+| Pipeline | Complexity | Tool Use | Prompts | Output | Use Case |
+|----------|------------|----------|---------|--------|----------|
+| **Standard Evaluation** | Medium | No | Multiple scorers | Aggregate metrics | General model evaluation |
+| **Trace-Based Judge** | High | Yes (6 tools) | Dynamic + Instructions | JSON rating | Complex agent behavior |
+| **RAG Evaluation** | Medium | No | Pre-defined | YES/NO or precision | RAG system quality |
+| **GEPA Optimization** | High | No | Reflection (external) | Optimized prompts | Prompt improvement |
+| **Built-in Judge** | Low | No | Pre-defined | YES/NO | Quick assessments |
+| **Custom Judge** | Low | No | User-defined | Categorical/numeric | Domain-specific |
+
+### Common Data Flow Pattern
+
+```
+Input Data → Extract/Transform → Build Prompt → Invoke LLM →
+Parse Response → Create Feedback → Return/Aggregate
+```
+
+### Key Concepts
+
+1. **Feedback**: Universal output format with name, value, rationale
+2. **Trace**: Execution record with spans for observability
+3. **Structured Output**: JSON schemas for reliable parsing
+4. **Chain-of-Thought**: "Let's think step by step" reasoning
+5. **Parallel Execution**: ThreadPools for efficiency
+6. **Tool Calling**: Agentic behavior for complex analysis
+
