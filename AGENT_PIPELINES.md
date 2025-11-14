@@ -434,3 +434,345 @@ Instructions:
 
 ---
 
+## RAG Evaluation Pipelines
+
+**Purpose**: Evaluate Retrieval-Augmented Generation systems across three dimensions: relevance of retrieved chunks, sufficiency of context, and groundedness of responses.
+
+**Main File**: `/home/user/mlflow/mlflow/genai/scorers/builtin_scorers.py`
+
+### 1. Retrieval Relevance Pipeline
+
+**Purpose**: Evaluate if each retrieved document chunk is relevant to the user query. Returns precision score (fraction of relevant chunks).
+
+**Prompts Used**: `RETRIEVAL_RELEVANCE_PROMPT` from `/home/user/mlflow/mlflow/genai/judges/prompts/retrieval_relevance.py`
+
+#### Pipeline Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     RETRIEVAL RELEVANCE PIPELINE                             │
+│                 (Evaluates per-chunk relevance → precision)                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────┐
+│  Input: Trace    │
+│  - request       │
+│  - retriever     │
+│    spans         │
+└─────────┬────────┘
+          │
+          ▼
+┌──────────────────────────────────────┐
+│  1. Extract Request from Root Span   │
+│     - Get root span                  │
+│     - Extract request field          │
+└─────────┬────────────────────────────┘
+          │
+          ▼
+┌──────────────────────────────────────┐
+│  2. Find RETRIEVER Spans             │
+│     - Filter by span_type=RETRIEVER  │
+│     - Use last retriever if multiple │
+└─────────┬────────────────────────────┘
+          │
+          ▼
+┌──────────────────────────────────────┐
+│  3. Extract Retrieved Chunks         │
+│     - From retriever span outputs    │
+│     - Each chunk is a document       │
+└─────────┬────────────────────────────┘
+          │
+          ▼
+┌─────────────────────────────────────────────────────────┐
+│  4. For Each Chunk: Judge Relevance (Parallel)          │
+│                                                          │
+│  ┌────────────────────────────────────────────┐         │
+│  │  Prompt: RETRIEVAL_RELEVANCE_PROMPT        │         │
+│  │                                            │         │
+│  │  Consider this question and document.      │         │
+│  │  Is the document (fully or partially)     │         │
+│  │  relevant to the question?                 │         │
+│  │                                            │         │
+│  │  <question>{{request}}</question>          │         │
+│  │  <document>{{chunk}}</document>            │         │
+│  │                                            │         │
+│  │  Return JSON:                              │         │
+│  │  {                                         │         │
+│  │    "rationale": "Let's think step by step...",      │         │
+│  │    "result": "yes|no"                      │         │
+│  │  }                                         │         │
+│  └────────────┬───────────────────────────────┘         │
+│               │                                          │
+│               ▼                                          │
+│  ┌────────────────────────────────┐                     │
+│  │  LLM Judge Returns:            │                     │
+│  │  Feedback(                     │                     │
+│  │    name="retrieval_relevance"  │                     │
+│  │    value="yes" or "no"         │                     │
+│  │    rationale="..."             │                     │
+│  │  )                             │                     │
+│  └────────────┬───────────────────┘                     │
+└───────────────┼──────────────────────────────────────────┘
+                │
+                ▼
+    ┌─────────────────────────────────┐
+    │  5. Collect All YES/NO Results  │
+    └─────────────┬───────────────────┘
+                  │
+                  ▼
+    ┌────────────────────────────────────────────┐
+    │  6. Calculate Precision Score              │
+    │     precision = count(YES) / total_chunks  │
+    │                                            │
+    │     Example:                               │
+    │     - 5 chunks total                       │
+    │     - 3 chunks relevant (YES)              │
+    │     - 2 chunks not relevant (NO)           │
+    │     → precision = 3/5 = 0.6                │
+    └────────────┬───────────────────────────────┘
+                 │
+                 ▼
+    ┌────────────────────────────────────────────┐
+    │  7. Return Final Feedback                  │
+    │     Feedback(                              │
+    │       name="retrieval_relevance_precision" │
+    │       value=0.6                            │
+    │       rationale="3 out of 5 chunks..."     │
+    │     )                                      │
+    └────────────────────────────────────────────┘
+```
+
+**Data Flow Summary**:
+```
+Trace → Extract Request → Find Retriever Spans → Extract Chunks →
+For Each Chunk: Judge(request, chunk) → Aggregate YES/NO → Precision Score
+```
+
+---
+
+### 2. Retrieval Sufficiency Pipeline
+
+**Purpose**: Determine if the retrieved context provides sufficient information to answer the query given expected facts or response.
+
+**Prompts Used**: `CONTEXT_SUFFICIENCY_PROMPT` from `/home/user/mlflow/mlflow/genai/judges/prompts/context_sufficiency.py`
+
+#### Pipeline Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    RETRIEVAL SUFFICIENCY PIPELINE                            │
+│              (Is retrieved context sufficient to support answer?)            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────┐
+│  Input: Trace    │
+│  - request       │
+│  - retriever     │
+│  - expectations  │
+│    or trace      │
+│    assessments   │
+└─────────┬────────┘
+          │
+          ▼
+┌──────────────────────────────────────┐
+│  1. Extract Request from Root Span   │
+└─────────┬────────────────────────────┘
+          │
+          ▼
+┌──────────────────────────────────────┐
+│  2. Extract Retrieved Context        │
+│     - Find last RETRIEVER span       │
+│     - Get all retrieved chunks       │
+│     - Concatenate as context         │
+└─────────┬────────────────────────────┘
+          │
+          ▼
+┌────────────────────────────────────────────────────────┐
+│  3. Get Expected Facts or Response                     │
+│     Priority order:                                    │
+│     a) expectations.expected_facts (from dataset)      │
+│     b) expectations.expected_response (from dataset)   │
+│     c) trace.data.assessments["expected_facts"]        │
+│     d) trace.data.assessments["expected_response"]     │
+└─────────┬──────────────────────────────────────────────┘
+          │
+          ▼
+┌─────────────────────────────────────────────────────────────┐
+│  4. Build Sufficiency Judge Prompt                          │
+│                                                              │
+│  ┌────────────────────────────────────────────┐             │
+│  │  CONTEXT_SUFFICIENCY_PROMPT_INSTRUCTIONS   │             │
+│  │                                            │             │
+│  │  Consider this claim and document.         │             │
+│  │  Is the claim supported by the document?   │             │
+│  │                                            │             │
+│  │  <claim>                                   │             │
+│  │    <question>{{request}}</question>        │             │
+│  │    <answer>{{expected_facts}}</answer>     │             │
+│  │  </claim>                                  │             │
+│  │  <document>{{context}}</document>          │             │
+│  │                                            │             │
+│  │  + CONTEXT_SUFFICIENCY_PROMPT_OUTPUT       │             │
+│  │  Return JSON: {                            │             │
+│  │    "rationale": "Let's think step by step...",          │             │
+│  │    "result": "yes|no"                      │             │
+│  │  }                                         │             │
+│  └────────────┬───────────────────────────────┘             │
+└───────────────┼──────────────────────────────────────────────┘
+                │
+                ▼
+    ┌─────────────────────────────────┐
+    │  5. Invoke Judge                │
+    │     is_context_sufficient(      │
+    │       request=request,           │
+    │       context=context,           │
+    │       expected_facts=facts,      │
+    │       expected_response=response │
+    │     )                            │
+    └─────────────┬───────────────────┘
+                  │
+                  ▼
+    ┌─────────────────────────────────┐
+    │  6. Return Feedback             │
+    │     Feedback(                   │
+    │       name="context_sufficiency" │
+    │       value="yes" or "no"       │
+    │       rationale="..."           │
+    │     )                           │
+    └─────────────────────────────────┘
+```
+
+**Data Flow Summary**:
+```
+Trace → Extract (Request + Context + Expected) →
+Judge(request, context, expected) → YES/NO Feedback
+```
+
+**Key Logic**: Checks if the retrieved documents contain enough information to support the expected answer/facts.
+
+---
+
+### 3. Retrieval Groundedness Pipeline
+
+**Purpose**: Verify that the final response is grounded in (supported by) the retrieved context, detecting hallucinations.
+
+**Prompts Used**: `GROUNDEDNESS_PROMPT` from `/home/user/mlflow/mlflow/genai/judges/prompts/groundedness.py`
+
+#### Pipeline Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                   RETRIEVAL GROUNDEDNESS PIPELINE                            │
+│              (Is the response grounded in retrieved context?)                │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────┐
+│  Input: Trace    │
+│  - request       │
+│  - response      │
+│  - retriever     │
+└─────────┬────────┘
+          │
+          ▼
+┌──────────────────────────────────────┐
+│  1. Extract Request from Root Span   │
+│     - Get root span inputs           │
+└─────────┬────────────────────────────┘
+          │
+          ▼
+┌──────────────────────────────────────┐
+│  2. Extract Final Response           │
+│     - Get root span outputs          │
+│     - Or from outputs parameter      │
+└─────────┬────────────────────────────┘
+          │
+          ▼
+┌──────────────────────────────────────┐
+│  3. Extract Retrieved Context        │
+│     - Find all RETRIEVER spans       │
+│     - Collect all chunks             │
+│     - Concatenate as context         │
+└─────────┬────────────────────────────┘
+          │
+          ▼
+┌─────────────────────────────────────────────────────────────┐
+│  4. Build Groundedness Judge Prompt                         │
+│                                                              │
+│  ┌────────────────────────────────────────────┐             │
+│  │  GROUNDEDNESS_PROMPT_INSTRUCTIONS          │             │
+│  │                                            │             │
+│  │  Consider this claim and document.         │             │
+│  │  Is the claim supported by the document?   │             │
+│  │                                            │             │
+│  │  <claim>                                   │             │
+│  │    <question>{{request}}</question>        │             │
+│  │    <answer>{{response}}</answer>           │             │
+│  │  </claim>                                  │             │
+│  │  <document>{{context}}</document>          │             │
+│  │                                            │             │
+│  │  + GROUNDEDNESS_PROMPT_OUTPUT              │             │
+│  │  Return JSON: {                            │             │
+│  │    "rationale": "Let's think step by step...",          │             │
+│  │    "result": "yes|no"                      │             │
+│  │  }                                         │             │
+│  └────────────┬───────────────────────────────┘             │
+└───────────────┼──────────────────────────────────────────────┘
+                │
+                ▼
+    ┌─────────────────────────────────┐
+    │  5. Invoke Judge                │
+    │     is_grounded(                │
+    │       request=request,           │
+    │       response=response,         │
+    │       context=context            │
+    │     )                            │
+    └─────────────┬───────────────────┘
+                  │
+                  ▼
+    ┌─────────────────────────────────┐
+    │  6. Return Feedback             │
+    │     Feedback(                   │
+    │       name="groundedness"       │
+    │       value="yes" or "no"       │
+    │       rationale="..."           │
+    │     )                           │
+    └─────────────────────────────────┘
+```
+
+**Data Flow Summary**:
+```
+Trace → Extract (Request + Response + Context) →
+Judge(request, response, context) → YES/NO Feedback
+```
+
+**Key Logic**: Ensures the response doesn't contain claims that aren't supported by the retrieved documents (anti-hallucination check).
+
+---
+
+### RAG Pipeline Comparison
+
+| Pipeline | Purpose | Inputs | Output | Prompt Used |
+|----------|---------|--------|--------|-------------|
+| **Retrieval Relevance** | Are retrieved chunks relevant? | Request + Each Chunk | Precision (0-1) | RETRIEVAL_RELEVANCE_PROMPT |
+| **Retrieval Sufficiency** | Is context sufficient for answer? | Request + Context + Expected | YES/NO | CONTEXT_SUFFICIENCY_PROMPT |
+| **Retrieval Groundedness** | Is response grounded in context? | Request + Response + Context | YES/NO | GROUNDEDNESS_PROMPT |
+
+### Common Pattern
+
+All three RAG pipelines follow this pattern:
+
+1. **Extract from Trace**: Get request, response, and/or context from trace spans
+2. **Build Prompt**: Use pre-defined judge prompts with extracted data
+3. **Invoke Judge**: Call LLM judge with structured output (JSON with rationale + result)
+4. **Return Feedback**: Convert judge response to Feedback object
+
+### Key Files
+
+- **Scorers**: `/home/user/mlflow/mlflow/genai/scorers/builtin_scorers.py`
+- **Prompts**:
+  - Retrieval Relevance: `/home/user/mlflow/mlflow/genai/judges/prompts/retrieval_relevance.py`
+  - Context Sufficiency: `/home/user/mlflow/mlflow/genai/judges/prompts/context_sufficiency.py`
+  - Groundedness: `/home/user/mlflow/mlflow/genai/judges/prompts/groundedness.py`
+
+---
+
