@@ -413,3 +413,383 @@ Instructions
 
 ---
 
+## Evaluation Metrics Prompts
+
+These prompts power LLM-as-a-judge evaluation metrics for assessing model outputs on various dimensions. All metrics use a 1-5 scoring scale with detailed rubrics and include example evaluations.
+
+**Location**: `/home/user/mlflow/mlflow/metrics/genai/prompts/v1.py`
+
+### Grading System Prompt Template
+
+**Purpose**: Base template for all LLM-as-a-judge metrics. Provides structured format for scoring and justification. Supports two modes: with input (considers both input and output) and without input (only considers output).
+
+**Key Features**:
+- Impartial judge persona
+- Structured two-line response format: `score` and `justification`
+- Supports grading context columns for additional information
+- Includes metric definition, grading rubric, and examples
+
+**Input Variables**:
+- `name`: Name of the metric being evaluated
+- `input`: User input (only in include_input=True mode)
+- `output`: Model output to evaluate
+- `grading_context_columns`: Additional context (e.g., targets, context)
+- `definition`: Metric definition
+- `grading_prompt`: Grading rubric
+- `examples`: Example evaluations
+
+**File**: `v1.py:17-91`
+
+```python
+def _build_grading_prompt_template(include_input: bool = True) -> PromptTemplate:
+    """
+    Build the grading system prompt template based on whether input is included.
+
+    Args:
+        include_input: Whether the prompt should reference and include input from the user.
+                      When False, the prompt only references the model's output.
+
+    Returns:
+        PromptTemplate configured for the specified input inclusion mode.
+    """
+    if include_input:
+        # When input is included, mention both input and output in the instructions
+        judge_description = (
+            "You are an impartial judge. You will be given an input that was sent to a "
+            "machine\nlearning model, and you will be given an output that the model produced. "
+            "You\nmay also be given additional information that was used by the model to "
+            "generate the output."
+        )
+        task_description = (
+            "Your task is to determine a numerical score called {name} based on the input "
+            "and output."
+        )
+        input_section = "\n\nInput:\n{input}"
+    else:
+        # When input is not included, only mention output in the instructions
+        judge_description = (
+            "You are an impartial judge. You will be given an output that a machine learning "
+            "model produced.\nYou may also be given additional information that was used by "
+            "the model to generate the output."
+        )
+        task_description = (
+            "Your task is to determine a numerical score called {name} based on the output "
+            "and any additional information provided."
+        )
+        input_section = ""
+
+    return PromptTemplate(
+        [
+            f"""
+Task:
+You must return the following fields in your response in two lines, one below the other:
+score: Your numerical score for the model's {{name}} based on the rubric
+justification: Your reasoning about the model's {{name}} score
+
+{judge_description}
+
+{task_description}
+A definition of {{name}} and a grading rubric are provided below.
+You must use the grading rubric to determine your score. You must also justify your score.
+
+Examples could be included below for reference. Make sure to use them as references and to
+understand them before completing the task.{input_section}
+
+Output:
+{{output}}
+
+{{grading_context_columns}}
+
+Metric definition:
+{{definition}}
+
+Grading rubric:
+{{grading_prompt}}
+
+{{examples}}
+
+You must return the following fields in your response in two lines, one below the other:
+score: Your numerical score for the model's {{name}} based on the rubric
+justification: Your reasoning about the model's {{name}} score
+
+Do not add additional new lines. Do not add any other fields.
+    """,
+        ]
+    )
+
+
+grading_system_prompt_template = _build_grading_prompt_template(include_input=True)
+```
+
+### 1. Answer Similarity Metric
+
+**Purpose**: Evaluates semantic similarity between model output and ground truth targets on a 1-5 scale. Assesses how well the output aligns with expected answers without requiring exact matches.
+
+**Grading Scale**:
+- **Score 1**: Little to no semantic similarity
+- **Score 2**: Partial semantic similarity on some aspects
+- **Score 3**: Moderate semantic similarity
+- **Score 4**: Substantial semantic similarity in most aspects
+- **Score 5**: Closely aligns in all significant aspects
+
+**Required Context**: `targets` (ground truth)
+
+**Example Scores**: Includes examples for scores 2 and 4
+
+**File**: `v1.py:136-198`
+
+```python
+@dataclass
+class AnswerSimilarityMetric:
+    definition = (
+        "Answer similarity is evaluated on the degree of semantic similarity of the provided "
+        "output to the provided targets, which is the ground truth. Scores can be assigned based "
+        "on the gradual similarity in meaning and description to the provided targets, where a "
+        "higher score indicates greater alignment between the provided output and provided targets."
+    )
+
+    grading_prompt = (
+        "Answer similarity: Below are the details for different scores:\n"
+        "- Score 1: The output has little to no semantic similarity to the provided targets.\n"
+        "- Score 2: The output displays partial semantic similarity to the provided targets on "
+        "some aspects.\n"
+        "- Score 3: The output has moderate semantic similarity to the provided targets.\n"
+        "- Score 4: The output aligns with the provided targets in most aspects and has "
+        "substantial semantic similarity.\n"
+        "- Score 5: The output closely aligns with the provided targets in all significant aspects."
+    )
+
+    grading_context_columns = ["targets"]
+    parameters = default_parameters
+    default_model = default_model
+
+    example_score_2 = EvaluationExample(
+        input="What is MLflow?",
+        output="MLflow is an open-source platform.",
+        score=2,
+        justification="The provided output is partially similar to the target, as it captures the "
+        "general idea that MLflow is an open-source platform. However, it lacks the comprehensive "
+        "details and context provided in the target about MLflow's purpose, development, and "
+        "challenges it addresses. Therefore, it demonstrates partial, but not complete, "
+        "semantic similarity.",
+        grading_context={
+            "targets": "MLflow is an open-source platform for managing the end-to-end "
+            "machine learning (ML) lifecycle. It was developed by Databricks, a company "
+            "that specializes in big data and machine learning solutions. MLflow is "
+            "designed to address the challenges that data scientists and machine learning "
+            "engineers face when developing, training, and deploying machine learning "
+            "models."
+        },
+    )
+
+    example_score_4 = EvaluationExample(
+        input="What is MLflow?",
+        output="MLflow is an open-source platform for managing machine learning workflows, "
+        "including experiment tracking, model packaging, versioning, and deployment, simplifying "
+        "the ML lifecycle.",
+        score=4,
+        justification="The provided output aligns closely with the target. It covers various key "
+        "aspects mentioned in the target, including managing machine learning workflows, "
+        "experiment tracking, model packaging, versioning, and deployment. While it may not include"
+        " every single detail from the target, it demonstrates substantial semantic similarity.",
+        grading_context={
+            "targets": "MLflow is an open-source platform for managing the end-to-end "
+            "machine learning (ML) lifecycle. It was developed by Databricks, a company "
+            "that specializes in big data and machine learning solutions. MLflow is "
+            "designed to address the challenges that data scientists and machine learning "
+            "engineers face when developing, training, and deploying machine learning "
+            "models."
+        },
+    )
+
+    default_examples = [example_score_2, example_score_4]
+```
+
+### 2. Faithfulness Metric
+
+**Purpose**: Assesses factual consistency between model output and provided context. Measures what proportion of claims in the output can be derived from the context. Important for RAG systems.
+
+**Key Characteristic**: Ignores the input question entirely - only evaluates output against context
+
+**Grading Scale**:
+- **Score 1**: None of the claims can be inferred from context
+- **Score 2**: Some claims can be inferred, but majority are missing/inconsistent
+- **Score 3**: Half or more claims can be inferred from context
+- **Score 4**: Most claims supported with very little unsupported information
+- **Score 5**: All claims directly supported by context
+
+**Required Context**: `context`
+
+**Example Scores**: Includes examples for scores 2 and 5
+
+**File**: `v1.py:202-273`
+
+```python
+@dataclass
+class FaithfulnessMetric:
+    definition = (
+        "Faithfulness is only evaluated with the provided output and provided context, please "
+        "ignore the provided input entirely when scoring faithfulness. Faithfulness assesses "
+        "how much of the provided output is factually consistent with the provided context. A "
+        "higher score indicates that a higher proportion of claims present in the output can be "
+        "derived from the provided context. Faithfulness does not consider how much extra "
+        "information from the context is not present in the output."
+    )
+
+    grading_prompt = (
+        "Faithfulness: Below are the details for different scores:\n"
+        "- Score 1: None of the claims in the output can be inferred from the provided context.\n"
+        "- Score 2: Some of the claims in the output can be inferred from the provided context, "
+        "but the majority of the output is missing from, inconsistent with, or contradictory to "
+        "the provided context.\n"
+        "- Score 3: Half or more of the claims in the output can be inferred from the provided "
+        "context.\n"
+        "- Score 4: Most of the claims in the output can be inferred from the provided context, "
+        "with very little information that is not directly supported by the provided context.\n"
+        "- Score 5: All of the claims in the output are directly supported by the provided "
+        "context, demonstrating high faithfulness to the provided context."
+    )
+
+    grading_context_columns = ["context"]
+    # Example with score 2 shows contradictory claims
+    # Example with score 5 shows fully supported claims
+    default_examples = [example_score_2, example_score_5]
+```
+
+### 3. Answer Correctness Metric
+
+**Purpose**: Evaluates accuracy of model output based on ground truth targets. Combines semantic similarity with factual correctness assessment.
+
+**Grading Scale**:
+- **Score 1**: Completely incorrect or contradicts targets
+- **Score 2**: Partially correct with significant discrepancies
+- **Score 3**: Addresses some aspects accurately with minor inaccuracies
+- **Score 4**: Mostly correct with one or more minor omissions
+- **Score 5**: Correct with high accuracy and semantic similarity
+
+**Required Context**: `targets` (ground truth)
+
+**Example Scores**: Includes examples for scores 2 and 4
+
+**File**: `v1.py:277-345`
+
+```python
+@dataclass
+class AnswerCorrectnessMetric:
+    definition = (
+        "Answer correctness is evaluated on the accuracy of the provided output based on the "
+        "provided targets, which is the ground truth. Scores can be assigned based on the degree "
+        "of semantic similarity and factual correctness of the provided output to the provided "
+        "targets, where a higher score indicates higher degree of accuracy."
+    )
+
+    grading_prompt = (
+        "Answer Correctness: Below are the details for different scores:\n"
+        "- Score 1: The output is completely incorrect. It is completely different from or "
+        "contradicts the provided targets.\n"
+        "- Score 2: The output demonstrates some degree of semantic similarity and includes "
+        "partially correct information. However, the output still has significant discrepancies "
+        "with the provided targets or inaccuracies.\n"
+        "- Score 3: The output addresses a couple of aspects of the input accurately, aligning "
+        "with the provided targets. However, there are still omissions or minor inaccuracies.\n"
+        "- Score 4: The output is mostly correct. It provides mostly accurate information, but "
+        "there may be one or more minor omissions or inaccuracies.\n"
+        "- Score 5: The output is correct. It demonstrates a high degree of accuracy and "
+        "semantic similarity to the targets."
+    )
+
+    grading_context_columns = ["targets"]
+    default_examples = [example_score_2, example_score_4]
+```
+
+### 4. Answer Relevance Metric
+
+**Purpose**: Measures appropriateness and applicability of output with respect to the input question. Assesses how directly the output addresses the question.
+
+**Grading Scale**:
+- **Score 1**: Doesn't mention the question or completely irrelevant
+- **Score 5**: Addresses all aspects of the question with all parts meaningful and relevant
+
+**No Additional Context Required**: Only uses input and output
+
+**Example Scores**: Includes examples for scores 2 and 5
+
+**File**: `v1.py:349-393`
+
+```python
+@dataclass
+class AnswerRelevanceMetric:
+    definition = (
+        "Answer relevance measures the appropriateness and applicability of the output with "
+        "respect to the input. Scores should reflect the extent to which the output directly "
+        "addresses the question provided in the input, and give lower scores for incomplete or "
+        "redundant output."
+    )
+
+    grading_prompt = (
+        "Answer relevance: Please give a score from 1-5 based on the degree of relevance to the "
+        "input, where the lowest and highest scores are defined as follows:"
+        "- Score 1: The output doesn't mention anything about the question or is completely "
+        "irrelevant to the input.\n"
+        "- Score 5: The output addresses all aspects of the question and all parts of the output "
+        "are meaningful and relevant to the question."
+    )
+
+    parameters = default_parameters
+    default_model = default_model
+    default_examples = [example_score_2, example_score_5]
+```
+
+### 5. Relevance Metric
+
+**Purpose**: Comprehensive relevance evaluation considering both input and context. Assesses appropriateness, significance, and applicability of output with respect to both the question and provided context.
+
+**Grading Scale**:
+- **Score 1**: Completely irrelevant to question or provided context
+- **Score 2**: Some relevance to question and somehow related to context
+- **Score 3**: Mostly answers question and largely consistent with context
+- **Score 4**: Answers question and consistent with context
+- **Score 5**: Comprehensively answers question using provided context
+
+**Required Context**: `context`
+
+**Example Scores**: Includes examples for scores 2 and 4
+
+**File**: `v1.py:397-459`
+
+```python
+@dataclass
+class RelevanceMetric:
+    definition = (
+        "Relevance encompasses the appropriateness, significance, and applicability of the output "
+        "with respect to both the input and context. Scores should reflect the extent to which the "
+        "output directly addresses the question provided in the input, given the provided context."
+    )
+
+    grading_prompt = (
+        "Relevance: Below are the details for different scores:"
+        "- Score 1: The output doesn't mention anything about the question or is completely "
+        "irrelevant to the provided context.\n"
+        "- Score 2: The output provides some relevance to the question and is somehow related "
+        "to the provided context.\n"
+        "- Score 3: The output mostly answers the question and is largely consistent with the "
+        "provided context.\n"
+        "- Score 4: The output answers the question and is consistent with the provided context.\n"
+        "- Score 5: The output answers the question comprehensively using the provided context."
+    )
+
+    grading_context_columns = ["context"]
+    parameters = default_parameters
+    default_model = default_model
+    default_examples = [example_score_2, example_score_4]
+```
+
+**Common Pattern Across All Metrics**:
+- Use impartial judge persona
+- Require both `score` (1-5) and `justification` in response
+- Include detailed rubrics with score definitions
+- Provide concrete examples for reference
+- Default to GPT-4 with temperature=0.0 for consistency
+
+---
+
