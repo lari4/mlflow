@@ -299,3 +299,117 @@ EQUIVALENCE_PROMPT = EQUIVALENCE_PROMPT_INSTRUCTIONS + EQUIVALENCE_PROMPT_OUTPUT
 
 ---
 
+## Instructions Judge Prompts
+
+These prompts are used by the Instructions Judge to evaluate AI agent performance based on custom instructions. The judge can operate in two modes: field-based evaluation (simple) or trace-based evaluation (advanced with tool access).
+
+**Location**: `/home/user/mlflow/mlflow/genai/judges/instructions_judge/constants.py`
+
+### 1. Judge Base Prompt
+
+**Purpose**: Common base prompt that establishes the judge's role and sets expectations for all judge evaluations.
+
+**File**: `constants.py:9-11`
+
+```python
+JUDGE_BASE_PROMPT = """You are an expert judge tasked with evaluating the performance of an AI
+agent on a particular query. You will be given instructions that describe the criteria and
+methodology for evaluating the agent's performance on the query."""
+```
+
+### 2. Instructions Judge System Prompt (Field-Based)
+
+**Purpose**: Simple system prompt for evaluating agent performance based on specific fields (input, output, etc.) without trace analysis. Used when evaluation can be done by examining inputs/outputs directly.
+
+**Input Variables**:
+- `instructions`: The evaluation criteria and methodology
+
+**File**: `constants.py:14`
+
+```python
+INSTRUCTIONS_JUDGE_SYSTEM_PROMPT = JUDGE_BASE_PROMPT + "\n\nYour task: {{instructions}}."
+```
+
+### 3. Instructions Judge Trace Prompt (Trace-Based)
+
+**Purpose**: Advanced evaluation prompt that enables the judge to analyze agent execution traces step-by-step. The judge has access to tools to inspect spans, search trace content, and gather execution details. This is used for complex evaluations requiring deep analysis of agent behavior.
+
+**Key Features**:
+- Provides methodical 5-step evaluation process
+- Judge has access to tools for trace inspection (fetch metadata, list spans, search patterns)
+- Requires structured JSON output with evaluation rating fields
+- Supports analysis of intermediate steps, decisions, and outputs
+
+**Input Variables**:
+- `evaluation_rating_fields`: JSON schema for the evaluation output
+- `instructions`: The evaluation criteria and methodology
+
+**Placeholder Variables**:
+- `{{ trace }}`: Referenced in instructions, accessed via tools
+
+**File**: `constants.py:18-63`
+
+```python
+INSTRUCTIONS_JUDGE_TRACE_PROMPT_TEMPLATE = (
+    JUDGE_BASE_PROMPT
+    + """ Your job is to analyze a trace of the agent's execution on the
+query and provide an evaluation rating in accordance with the instructions.
+
+A *trace* is a step-by-step record of how the agent processed the query, including the input query
+itself, all intermediate steps, decisions, and outputs. Each step in a trace is represented as a
+*span*, which includes the inputs and outputs of that step, as well as latency information and
+metadata.
+
+The instructions containing the evaluation criteria and methodology are provided below, and they
+refer to a placeholder called {{{{ trace }}}}. To read the actual trace, you will need to use the
+tools provided to you. These tools enable you to 1. fetch trace metadata, timing, & execution
+details, 2. list all spans in the trace with inputs and outputs, 3. search for specific text or
+patterns across the entire trace, and much more. These tools do *not* require you to specify a
+particular trace; the tools will select the relevant trace automatically (however, you *will* need
+to specify *span* IDs when retrieving specific spans).
+
+In order to follow the instructions precisely and correctly, you must think methodically and act
+step-by-step:
+
+1. Thoroughly read the instructions to understand what information you need to gather from the trace
+   in order to perform the evaluation, according to the criteria and methodology specified.
+2. Look at the tools available to you, and use as many of them as necessary in order to gather the
+   information you need from the trace.
+3. Carefully read and analyze the information you gathered.
+4. Think critically about whether you have enough information to produce an evaluation rating in
+   accordance with the instructions. If you do not have enough information, or if you suspect that
+   there is additional relevant information in the trace that you haven't gathered, then go back
+   to steps 2 and 3.
+5. Once you have gathered enough information, provide your evaluation rating in accordance with the
+   instructions.
+
+You *must* format your evaluation rating as a JSON object with the following fields. Pay close
+attention to the field type of the evaluation rating (string, boolean, numeric, etc.), and ensure
+that it conforms to the instructions.
+
+Evaluation Rating Fields
+------------------------
+{evaluation_rating_fields}
+
+Instructions
+------------------------
+{instructions}
+"""
+)
+```
+
+**Evaluation Process**:
+1. Read and understand the instructions
+2. Use provided tools to gather trace information
+3. Analyze the gathered information
+4. Assess if more information is needed (loop back to step 2 if yes)
+5. Provide structured JSON evaluation rating
+
+**Available Tools** (referenced in prompt):
+- Fetch trace metadata, timing, and execution details
+- List all spans with inputs and outputs
+- Search for specific text or patterns across the trace
+- Retrieve specific spans by ID
+
+---
+
